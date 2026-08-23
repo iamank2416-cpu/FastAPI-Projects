@@ -1,15 +1,17 @@
+import io
 import joblib
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 app = FastAPI()
 
-#load model
+# load model
 model = joblib.load("house_model.joblib")
 features = joblib.load("house_features.joblib")
 
-#input schema
+# input schema
 class HouseFeatures(BaseModel):
     MedInc : float = Field(gt=0, description="Median income of Neighborhood")
     HouseAge : float = Field(ge=0, description="Average age of houses in the block")
@@ -21,7 +23,7 @@ class HouseFeatures(BaseModel):
     Longitude : float = Field(ge=-125, le=-114, description="Longitude")
     
     
-#Creating roots #home 
+# Creating roots #home 
 @app.get("/")
 def home():
     return {
@@ -39,7 +41,7 @@ def health():
         "avg_error":"$32,773"
     }
     
-#Creating schema for prediction
+# Creating schema for prediction
 @app.post("/predict")
 def predict(house: HouseFeatures):
     try:
@@ -67,3 +69,79 @@ def predict(house: HouseFeatures):
             status_code=500,
             detail=f"prediction failed: {str(e)}"
         )
+        
+@app.post("/predict-file")
+async def predict_file(file: UploadFile=File(...)):
+    
+    # looking for .csv format file
+    if not file.filename.endswith(".csv"):     
+        raise HTTPException(
+            status_code=400,
+            detail="please upload a csv file only."
+        )
+    
+    # can do other tasks while the file is being read    
+    contents = await file.read()
+    # b'name,age'\nanki,30\nAdi..
+    
+    # converts raw bytes into pandas dataframe, Convert CSV bytes to DataFrame
+    df = pd.read_csv(io.BytesIO(contents))  
+    
+    required_columns = [
+        "MedInc",
+        "HouseAge",
+        "AveRooms",
+        "AveBedrms",
+        "Population",
+        "AveOccup",
+        "Latitude",
+        "Longitude"
+    ]
+    
+    # checking missing columns
+    missing_columns = [
+        col for col in required_columns
+        if col not in df.columns
+    ]
+    
+    if missing_columns:
+        raise HTTPException(
+            status_code=400,
+            detail=f'These columns are missing from your file {missing_columns}'
+        )
+        
+    # check length of file is empty or not
+    if len(df) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail='The uploaded file has no data rows.'
+        )
+    
+    try:    # model make prediction and give one row at a price
+         
+        prediction=model.predict(df[required_columns])
+        
+        # Add predictions to DataFrame, made prediction will be add in new column
+        df["predicted_price_usd"] = prediction * 100000   
+        
+        # Format Price
+        df["predicted_price_usd"] = df["predicted_price_usd"].apply(lambda x:f"${x:,.0f}")
+        
+        # Now will show the output
+        output = df.to_csv(index=False)
+        
+        # convert to downloadable file csv format
+        return StreamingResponse(
+            io.StringIO(output),
+            media_type="text/csv",
+            headers={
+                "content-Disposition":"attachment; filename=predictions.csv"
+            }
+        )
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Prediction failed:{str(e)}"
+        )    
+    
